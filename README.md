@@ -1,6 +1,4 @@
-Absolutely! Here's the final version of your README. You can copy and paste this directly into your GitHub repository's README file:
 
----
 
 # ESP32 GPIO Control and Scheduling Web Server
 
