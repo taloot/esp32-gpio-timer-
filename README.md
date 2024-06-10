@@ -1,4 +1,5 @@
 
+
 ---
 
 # ESP32 GPIO Control and Scheduling Web Server
@@ -43,13 +44,31 @@ This project implements a web server on an ESP32 microcontroller to remotely man
    char pass[64] = "your_PASSWORD";
    ```
 
-4. **Upload to ESP32**:
-   Connect your ESP32 to your computer and upload the code using the Arduino IDE.
+4. **Install ESP32 Board Support**:
+   - Open Arduino IDE.
+   - Go to `File` -> `Preferences`.
+   - In the `Additional Board Manager URLs` field, add the following URL:
+     ```
+     https://dl.espressif.com/dl/package_esp32_index.json
+     ```
+   - Go to `Tools` -> `Board` -> `Boards Manager`.
+   - Search for `ESP32` and install the `esp32` package by Espressif Systems.
+
+5. **Select the ESP32 Board**:
+   - Go to `Tools` -> `Board` and select your ESP32 board model (e.g., `ESP32 Dev Module`).
+
+6. **Select the Port**:
+   - Connect your ESP32 to your computer via USB.
+   - Go to `Tools` -> `Port` and select the appropriate COM port for your ESP32.
+
+7. **Upload the Code**:
+   - Click the `Upload` button in the Arduino IDE to compile and upload the code to your ESP32.
 
 ### Usage
 
 1. **Access the Web Interface**:
-   After uploading, open the Serial Monitor to find the IP address assigned to the ESP32. Open this IP address in a web browser.
+   - After uploading, open the Serial Monitor (set baud rate to 115200) to find the IP address assigned to the ESP32.
+   - Open this IP address in a web browser.
 
 2. **GPIO Control**:
    - Toggle GPIO states by clicking the "Toggle" button.
