@@ -1,4 +1,3 @@
-Great! Here's the customized README for your GitHub repository:
 
 ---
 
