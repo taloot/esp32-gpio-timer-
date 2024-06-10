@@ -1,10 +1,10 @@
-
+Absolutely! Here's the final version of your README. You can copy and paste this directly into your GitHub repository's README file:
 
 ---
 
 # ESP32 GPIO Control and Scheduling Web Server
 
-This project implements a web server on an ESP32 microcontroller to remotely manage GPIO pins and their schedules. The web interface allows users to toggle GPIO states, set schedules, and manage network connections. The configuration is stored in SPIFFS, ensuring persistence across reboots.
+This project implements a web server on an ESP32 microcontroller to remotely manage GPIO pins and their schedules. The web interface allows users to toggle GPIO states, set schedules, and manage network connections. The configuration is stored in SPIFFS, ensuring persistence across reboots. This project is written for the ESP32-C3 but should work on all ESP variants.
 
 ## Features
 
@@ -22,7 +22,7 @@ This project implements a web server on an ESP32 microcontroller to remotely man
 
 ### Prerequisites
 
-- ESP32 microcontroller
+- ESP32 microcontroller (ESP32-C3 or other variants)
 - Arduino IDE with ESP32 board support installed
 - WiFi network credentials
 
@@ -55,7 +55,7 @@ This project implements a web server on an ESP32 microcontroller to remotely man
    - Search for `ESP32` and install the `esp32` package by Espressif Systems.
 
 5. **Select the ESP32 Board**:
-   - Go to `Tools` -> `Board` and select your ESP32 board model (e.g., `ESP32 Dev Module`).
+   - Go to `Tools` -> `Board` and select your ESP32 board model (e.g., `ESP32 Dev Module`, `ESP32-C3 Dev Module`).
 
 6. **Select the Port**:
    - Connect your ESP32 to your computer via USB.
@@ -128,6 +128,14 @@ This ESP32 GPIO control and scheduling web server can be used in various practic
 - **getStatus**: Sends the current status of all GPIO pins to the client.
 - **scanNetworks**: Scans and sends a list of available WiFi networks.
 - **handleNetworkConnect**: Connects to a specified WiFi network.
+
+### Keywords
+
+ESP32, ESP32-C3, GPIO, Web Server, Home Automation, Scheduling, IoT, SPIFFS, WiFi, Arduino, Remote Control, Automation, Network Management, Time Synchronization, Real-Time Updates
+
+### Author
+
+This project is maintained by Taloot.
 
 ### Contributing
 
