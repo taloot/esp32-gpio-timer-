@@ -3,8 +3,8 @@
 #include <SPIFFS.h>
 #include <time.h>
 
-const char* ssid = "HUAWEI 4G";
-const char* pwd = "0506211557";
+const char* ssid = "ssid";
+const char* pwd = "pass";
 WebServer srv(80);
 const int maxP = 10;
 int numP = 0, p[maxP];
