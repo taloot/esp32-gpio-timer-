@@ -1,0 +1,64 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <time.h>
+
+const char *ss = "SSID", *pwd = "PASS", *ntp = "pool.ntp.org";
+WebServer srv(80); const int mp = 9, gmt = 10800; int np = 0, fl = -1, p[mp], sm[mp];
+struct Sch { uint8_t sH, sM, eH, eM, m, i; uint16_t fO, fF, dT; } sch[mp];
+#define SG(i, g) (p[i] = g, pinMode(g, OUTPUT), digitalWrite(g, LOW), svC())
+#define RT() (srv.sendHeader("Location", "/"), srv.send(303), void())
+void sw() { WiFi.begin(ss, pwd); while (WiFi.status() != WL_CONNECTED) delay(500); }
+void is() { if (!SPIFFS.begin(true)) return; }
+
+String gH() {
+  String h = "<script>function um(i){var m=document.getElementById('mo'+i).value;document.getElementById('sc'+i).style.display=(m=='1')?'block':'none';document.getElementById('fr'+i).style.display=(m=='2')?'block':'none';document.getElementById('in'+i).style.display=(m=='3')?'block':'none';}function tg(i){var x=new XMLHttpRequest();x.open('GET','/tgl?i='+i,true);x.onload=function(){if(x.status===200)document.getElementById('st-'+i).textContent=x.responseText;};x.send();}</script>";
+  for (int i = 0; i < np; i++) h += "<div class='col-md-4'><div class='card'><div class='card-body'><h5>GPIO "+String(p[i])+"</h5><p id='st-"+String(i)+"'>"+String(digitalRead(p[i])?"ON":"OFF")+"</p><label for='mo"+String(i)+"'>Mode:</label><select id='mo"+String(i)+"' class='form-control' onchange='um("+String(i)+")'><option value='0'"+(sch[i].m==0?" selected":"")+">Off</option><option value='1'"+(sch[i].m==1?" selected":"")+">Scheduled</option><option value='2'"+(sch[i].m==2?" selected":"")+">Frequency</option><option value='3'"+(sch[i].m==3?" selected":"")+">Input</option></select><div id='sc"+String(i)+"' style='display:"+(sch[i].m==1?"block":"none")+"'>Start:<input type='number' id='sH"+String(i)+"' value='"+String(sch[i].sH)+"' min='0' max='23' class='form-control mb-2'><input type='number' id='sM"+String(i)+"' value='"+String(sch[i].sM)+"' min='0' max='59' class='form-control mb-2'>End:<input type='number' id='eH"+String(i)+"' value='"+String(sch[i].eH)+"' min='0' max='23' class='form-control mb-2'><input type='number' id='eM"+String(i)+"' value='"+String(sch[i].eM)+"' min='0' max='59' class='form-control mb-2'></div><div id='fr"+String(i)+"' style='display:"+(sch[i].m==2?"block":"none")+"'>On:<input type='number' id='fO"+String(i)+"' value='"+String(sch[i].fO)+"' min='1' class='form-control mb-2'>Off:<input type='number' id='fF"+String(i)+"' value='"+String(sch[i].fF)+"' min='1' class='form-control mb-2'></div><div id='in"+String(i)+"' style='display:"+(sch[i].m==3?"block":"none")+"'>Input Pin:<input type='number' id='i"+String(i)+"' value='"+String(sch[i].i)+"' min='0' max='39' class='form-control mb-2'>Debounce Time:<input type='number' id='dT"+String(i)+"' value='"+sch[i].dT+"' min='1' class='form-control mb-2'></div><button onclick=\"location.href='/setp?i="+String(i)+"&gpio='+document.getElementById('p"+String(i)+"').value+'&m='+document.getElementById('mo"+String(i)+"').value+'&sH='+document.getElementById('sH"+String(i)+"').value+'&sM='+document.getElementById('sM"+String(i)+"').value+'&eH='+document.getElementById('eH"+String(i)+"').value+'&eM='+document.getElementById('eM"+String(i)+"').value+'&fO='+document.getElementById('fO"+String(i)+"').value+'&fF='+document.getElementById('fF"+String(i)+"').value+'&i='+document.getElementById('i"+String(i)+"').value+'&dT='+document.getElementById('dT"+String(i)+"').value\" class='btn btn-info mt-2'>Set</button><button onclick=\"location.href='/rmp?i="+String(i)+"'\" class='btn btn-danger mt-2'>Remove GPIO</button><button onclick='tg("+String(i)+")' class='btn btn-warning mt-2'>Toggle</button></div></div></div>";
+  if (np < 9) h += "<div class='col-md-12 mt-4'><div class='input-group'><input type='number' id='np' class='form-control' placeholder='Enter GPIO number'><div class='input-group-append'><button class='btn btn-success' onclick=\"location.href='/addp?gpio='+document.getElementById('np').value\">Add GPIO</button></div></div></div>";
+  return h;
+}
+
+void hR() {
+ String pg = "<html><head><title>ESP32 Control</title><link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css'><script src='https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js'></script><script>$(document).ready(function(){$('.tgl-gpio').click(function(){var p=$(this).data('pin');$.get('/tgl?i='+p,function(dt){$('#st-'+p).text(dt);});});setInterval(function(){$.get('/getfloat',function(dt){$('#float-status').text(dt=='1'?'ON':'OFF');});},1000);});function upT(){fetch('/gettime').then(r=>r.text()).then(d=>{document.getElementById('time').innerHTML=d;});}setInterval(upT,1000);upT();</script><style>@media (max-width: 768px){.col-md-4{width:100%;margin-bottom:15px;}}</style></head><body><div class='container mt-5'><h1 class='text-center mb-4'>ESP32 GPIO Control</h1><div id='time' class='text-center mb-3'>Loading time...</div><div id='float-status' class='text-center mb-3'>Float Switch: Loading...</div><div class='row'>" + gH() + "</div></div></body></html>";
+ srv.send(200, "text/html", pg);
+}
+
+void hT() { int i = srv.arg("i").toInt(); digitalWrite(p[i], !digitalRead(p[i])); srv.send(200, "text/plain", digitalRead(p[i]) ? "ON" : "OFF"); }
+
+void hSP() {
+ int i = srv.arg("i").toInt(), gpio = srv.arg("gpio").toInt(); bool isAdd = srv.uri() == "/addp", isRm = srv.uri() == "/rmp";
+ if (isAdd && np < mp) SG(np++, gpio); else if (isRm && i < np) { for (int j = i; j < np - 1; j++) p[j] = p[j + 1], sch[j] = sch[j + 1], sm[j] = sm[j + 1]; np--; }
+ else sch[i].m = srv.arg("m").toInt(), sch[i].fO = srv.arg("fO").toInt(), sch[i].fF = srv.arg("fF").toInt(), sch[i].i = srv.arg("i").toInt(), sch[i].dT = srv.arg("dT").toInt(), SG(i, gpio);
+ svC(); RT();
+}
+
+void hSS() { int i = srv.arg("i").toInt(); sch[i].sH = srv.arg("sH").toInt(), sch[i].sM = srv.arg("sM").toInt(), sch[i].eH = srv.arg("eH").toInt(), sch[i].eM = srv.arg("eM").toInt(), sm[i] = sch[i].sH * 60 + sch[i].sM; svC(); RT(); }
+void hSF() { fl = srv.arg("gpio").toInt(); if (fl >= 0) pinMode(fl, INPUT); svC(); RT(); }
+void hGF() { srv.send(200, "text/plain", fl >= 0 ? String(digitalRead(fl)) : "0"); }
+void hGT() { struct tm t; if (!getLocalTime(&t)) { srv.send(200, "text/plain", "Failed to get time");return; } char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &t); srv.send(200, "text/plain", ts); }
+
+void cs() {
+ struct tm t; if (!getLocalTime(&t)) return; uint16_t nm = t.tm_hour * 60 + t.tm_min; static uint32_t lm[mp] = {0}, ld[mp] = {0}; static int ls[mp] = {LOW}, bs[mp] = {LOW};
+ for (int i = 0; i < np; i++) { uint32_t el = (millis() - lm[i]) / 60000; switch (sch[i].m) {
+  case 0: digitalWrite(p[i], LOW); break;
+  case 1: digitalWrite(p[i], (nm >= sm[i] && nm < sch[i].eH * 60 + sch[i].eM) ? HIGH : LOW); break;
+  case 2: if (el >= sch[i].fO + sch[i].fF) lm[i] = millis(); digitalWrite(p[i], el < sch[i].fO ? HIGH : LOW); break;
+  case 3: int r = digitalRead(sch[i].i); if (r != ls[i]) { ld[i] = millis(); } if ((millis() - ld[i]) > sch[i].dT) { if (r != bs[i]) { bs[i] = r; digitalWrite(p[i], bs[i]); } } ls[i] = r; break;
+}}}
+
+void svC() {
+ File f = SPIFFS.open("/gpio_cfg.txt", FILE_WRITE); if (!f) return; f.printf("%d,%d", np, fl);
+ for (int i = 0; i < np; i++) f.printf(",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", p[i], sch[i].sH, sch[i].sM, sch[i].eH, sch[i].eM, sch[i].m, sch[i].fO, sch[i].fF, sch[i].i, sch[i].dT); f.close();
+}
+
+void lg() {
+ File f = SPIFFS.open("/gpio_cfg.txt", FILE_READ); if (!f) return; String c = f.readString(); f.close();
+ if (c.length() > 0) { int s = 0, e = c.indexOf(','); np = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); fl = c.substring(s, e).toInt(); s = e + 1;
+ for (int i = 0; i < np; i++) { e = c.indexOf(',', s); p[i] = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].sH = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].sM = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].eH = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].eM = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].m = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].fO = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].fF = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].i = c.substring(s, e).toInt(); s = e + 1; e = c.indexOf(',', s); sch[i].dT = c.substring(s, e).toInt(); s = e + 1; }}}
+
+void setup() {
+ sw(); is(); configTime(gmt, 0, ntp); lg();
+ for (int i = 0; i < np; i++) sm[i] = sch[i].sH * 60 + sch[i].sM, pinMode(p[i], OUTPUT), digitalWrite(p[i], LOW); if (fl >= 0) pinMode(fl, INPUT);
+ srv.on("/", hR); srv.on("/tgl", hT); srv.on("/setp", hSP); srv.on("/addp", hSP); srv.on("/rmp", hSP); srv.on("/sets", hSS); srv.on("/setfloat", hSF); srv.on("/getfloat", hGF); srv.on("/gettime", hGT); srv.begin();
+}
+void loop() { srv.handleClient(); cs(); }
