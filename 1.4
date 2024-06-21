@@ -1,0 +1,453 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <time.h>
+
+// Wi-Fi and NTP server details
+const char *ssid = "HUAWEI 4G", *pwd = "XXX", *ntp = "pool.ntp.org";
+WebServer srv(80); // Web server on port 80
+const int maxP = 9, gmt = 3 * 3600; // Maximum GPIO pins and GMT offset
+int nP = 0, flPin = -1, p[maxP], schMin[maxP]; // GPIO pin details and schedules
+struct Sch { uint8_t sH, sM, eH, eM, mode, inputPin; uint16_t freqOn, freqOff, debounceTime; } sch[maxP]; // Schedule structure
+
+#define SET_GPIO(i, g) (p[i] = g, pinMode(g, OUTPUT), digitalWrite(g, LOW), saveCfg())
+#define REDIRECT_TO_ROOT() (srv.sendHeader("Location", "/"), srv.send(303), void())
+
+// Function Declarations
+void handleRoot();
+void handleToggle();
+void handleSetAddRemovePin();
+void handleSetSchedule();
+void handleSetFloat();
+void handleGetFloat();
+void handleGetTime();
+
+void wifiSetup() {
+    WiFi.begin(ssid, pwd);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("WiFi connected.");
+}
+
+void initSPIFFS() {
+    if (!SPIFFS.begin(true)) return;
+}
+
+void chkSch() {
+    struct tm t;
+    if (!getLocalTime(&t)) return;
+    uint16_t nowM = t.tm_hour * 60 + t.tm_min;
+    static uint32_t lastMillis[maxP] = {0};
+    static uint32_t lastDebounceTime[maxP] = {0};
+    static int lastButtonState[maxP] = {LOW};
+    static int buttonState[maxP] = {LOW};
+    for (int i = 0; i < nP; i++) {
+        uint32_t elapsed = (millis() - lastMillis[i]) / 60000;
+        switch (sch[i].mode) {
+            case 0:
+                digitalWrite(p[i], LOW);
+                break;
+            case 1:
+                digitalWrite(p[i], (nowM >= schMin[i] && nowM < sch[i].eH * 60 + sch[i].eM) ? HIGH : LOW);
+                break;
+            case 2:
+                if (elapsed >= sch[i].freqOn + sch[i].freqOff) lastMillis[i] = millis();
+                digitalWrite(p[i], elapsed < sch[i].freqOn ? HIGH : LOW);
+                break;
+            case 3:
+                int reading = digitalRead(sch[i].inputPin);
+                if (reading != lastButtonState[i]) {
+                    lastDebounceTime[i] = millis();
+                }
+                if ((millis() - lastDebounceTime[i]) > sch[i].debounceTime) {
+                    if (reading != buttonState[i]) {
+                        buttonState[i] = reading;
+                        digitalWrite(p[i], buttonState[i]);
+                    }
+                }
+                lastButtonState[i] = reading;
+                break;
+        }
+    }
+}
+
+void saveCfg() {
+    File f = SPIFFS.open("/gpio_cfg.txt", FILE_WRITE);
+    if (!f) return;
+    f.printf("%d,%d", nP, flPin);
+    for (int i = 0; i < nP; i++) {
+        f.printf(",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", p[i], sch[i].sH, sch[i].sM, sch[i].eH, sch[i].eM, sch[i].mode, sch[i].freqOn, sch[i].freqOff, sch[i].inputPin, sch[i].debounceTime);
+    }
+    f.close();
+}
+
+void loadCfg() {
+    File f = SPIFFS.open("/gpio_cfg.txt", FILE_READ);
+    if (!f) return;
+    String c = f.readString();
+    f.close();
+    if (c.length() > 0) {
+        int s = 0, e = c.indexOf(',');
+        nP = c.substring(s, e).toInt();
+        s = e + 1;
+        e = c.indexOf(',', s);
+        flPin = c.substring(s, e).toInt();
+        s = e + 1;
+        for (int i = 0; i < nP; i++) {
+            e = c.indexOf(',', s);
+            p[i] = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].sH = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].sM = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].eH = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].eM = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].mode = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].freqOn = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].freqOff = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].inputPin = c.substring(s, e).toInt();
+            s = e + 1;
+            e = c.indexOf(',', s);
+            sch[i].debounceTime = c.substring(s, e).toInt();
+            s = e + 1;
+        }
+    }
+}
+
+void setupWebServer() {
+    srv.on("/", handleRoot);
+    srv.on("/tgl", handleToggle);
+    srv.on("/setp", handleSetAddRemovePin);
+    srv.on("/addp", handleSetAddRemovePin);
+    srv.on("/rmp", handleSetAddRemovePin);
+    srv.on("/sets", handleSetSchedule);
+    srv.on("/setfloat", handleSetFloat);
+    srv.on("/getfloat", handleGetFloat);
+    srv.on("/gettime", handleGetTime);
+    srv.begin();
+}
+
+String generateHTML() {
+    // JavaScript functions for updating mode and toggling GPIO
+    String c = "<script>function updateMode(index) {"
+               "var mode = document.getElementById('mode' + index).value;"
+               "document.getElementById('schedule' + index).style.display = (mode == '1') ? 'block' : 'none';"
+               "document.getElementById('frequency' + index).style.display = (mode == '2') ? 'block' : 'none';"
+               "document.getElementById('input' + index).style.display = (mode == '3') ? 'block' : 'none';"
+               "}"
+               "function setGPIO(index) {"
+               "var gpio = document.getElementById('p' + index);"
+               "var mode = document.getElementById('mode' + index);"
+               "var sH = document.getElementById('sH' + index);"
+               "var sM = document.getElementById('sM' + index);"
+               "var eH = document.getElementById('eH' + index);"
+               "var eM = document.getElementById('eM' + index);"
+               "var freqOn = document.getElementById('freqOn' + index);"
+               "var freqOff = document.getElementById('freqOff' + index);"
+               "var inputPin = document.getElementById('inputPin' + index);"
+               "var debounceTime = document.getElementById('debounceTime' + index);"
+                              "if (!gpio || !mode || !sH || !sM || !eH || !eM || !freqOn || !freqOff || !inputPin || !debounceTime) {"
+               "console.error('One or more elements are missing.');"
+               "return;"
+               "}"
+               "var url = '/setp?i=' + index + '&gpio=' + gpio.value + "
+                      "'&mode=' + mode.value + "
+                      "'&sH=' + sH.value + "
+                      "'&sM=' + sM.value + "
+                      "'&eH=' + eH.value + "
+                      "'&eM=' + eM.value + "
+                      "'&freqOn=' + freqOn.value + "
+                      "'&freqOff=' + freqOff.value + "
+                      "'&inputPin=' + inputPin.value + "
+                      "'&debounceTime=' + debounceTime.value;"
+                      "console.log('Set GPIO: ' + url);"
+                      "location.href = url;"
+               "}"
+               "function toggleGPIO(index) {"
+               "var url = '/tgl?i=' + index;"
+               "console.log('Toggle GPIO: ' + url);"
+               "location.href = url;"
+               "}"
+               "function updTime() {"
+               "fetch('/gettime')"
+               ".then(response => {"
+               "if (!response.ok) {"
+               "throw new Error('Network response was not ok');"
+               "}"
+               "return response.text();"
+               "})"
+               ".then(data => {"
+               "document.getElementById('time').innerHTML = data;"
+               "})"
+               ".catch(error => {"
+               "console.error('There has been a problem with your fetch operation:', error);"
+               "});"
+               "}"
+               "setInterval(updTime, 1000);"
+               "updTime();"
+               "</script>";
+
+    // Loop through each GPIO pin
+    for (int i = 0; i < nP; i++) {
+        c += "<div class='col-md-4 col-sm-6 mb-4'><div class='card'><div class='card-body'><h5 class='card-title'>GPIO " + String(p[i]) + "</h5>"
+             "<p class='card-text' id='status-" + String(i) + "'>" + (digitalRead(p[i]) ? "ON" : "OFF") + "</p>";
+
+        // Mode selection dropdown
+        c += "<label for='mode" + String(i) + "'>Mode:</label>"
+             "<select id='mode" + String(i) + "' class='form-control' onchange='updateMode(" + String(i) + ")'>"
+             "<option value='0'" + (sch[i].mode == 0 ? " selected" : "") + ">Off</option>"
+             "<option value='1'" + (sch[i].mode == 1 ? " selected" : "") + ">Scheduled</option>"
+             "<option value='2'" + (sch[i].mode == 2 ? " selected" : "") + ">Frequency</option>"
+             "<option value='3'" + (sch[i].mode == 3 ? " selected" : "") + ">Input</option></select>";
+
+        // Scheduled mode inputs
+        c += "<div id='schedule" + String(i) + "' style='display:" + (sch[i].mode == 1 ? "block" : "none") + ";'>"
+             "Start: <input type='number' id='sH" + String(i) + "' value='" + String(sch[i].sH) + "' min='0' max='23' class='form-control mb-2'>"
+             "<input type='number' id='sM" + String(i) + "' value='" + String(sch[i].sM) + "' min='0' max='59' class='form-control mb-2'>"
+             "End: <input type='number' id='eH" + String(i) + "' value='" + String(sch[i].eH) + "' min='0' max='23' class='form-control mb-2'>"
+             "<input type='number' id='eM" + String(i) + "' value='" + String(sch[i].eM) + "' min='0' max='59' class='form-control mb-2'></div>";
+
+        // Frequency mode inputs
+        c += "<div id='frequency" + String(i) + "' style='display:" + (sch[i].mode == 2 ? "block" : "none") + ";'>"
+             "On (min): <input type='number' id='freqOn" + String(i) + "' value='" + String(sch[i].freqOn) + "' min='1' class='form-control mb-2'>"
+             "Off (min): <input type='number' id='freqOff" + String(i) + "' value='" + String(sch[i].freqOff) + "' min='1' class='form-control mb-2'></div>";
+
+        // Input mode inputs
+        c += "<div id='input" + String(i) + "' style='display:" + (sch[i].mode == 3 ? "block" : "none") + ";'>"
+             "Input Pin: <input type='number' id='inputPin" + String(i) + "' value='" + String(sch[i].inputPin) + "' min='0' max='39' class='form-control mb-2'>"
+             "Debounce Time (ms): <input type='number' id='debounceTime" + String(i) + "' value='" + String(sch[i].debounceTime) + "' min='1' class='form-control mb-2'></div>";
+
+        // Control buttons
+        c += "<button onclick='setGPIO(" + String(i) + ")' class='btn btn-info mt-2'>Set</button>";
+        c += "<button onclick=\"location.href='/rmp?i=" + String(i) + "'\" class='btn btn-danger mt-2' onclick='console.log(\"Remove GPIO: /rmp?i=\" + " + String(i) + ")'>Remove GPIO</button>";
+        c += "<button onclick='toggleGPIO(" + String(i) + ")' class='btn btn-warning mt-2'>Toggle</button></div></div></div>";
+    }
+
+    // Add GPIO input if less than the maximum allowed
+    if (nP < 9) {
+        c += "<div class='col-md-12 mt-4'><div class='input-group'><input type='number' id='newp' class='form-control' placeholder='Enter GPIO number'>";
+        c += "<div class='input-group-append'><button class='btn btn-success' onclick=\"location.href='/addp?gpio='+document.getElementById('newp').value\">Add GPIO</button></div></div></div>";
+    }
+    return c;
+}
+
+void handleRoot() {
+    String page = "<html><head><title>ESP32 Control</title>"
+                  "<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css'>"
+                  "<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js'></script>"
+                  "<script>$(document).ready(function() {"
+                  "$('.tgl-gpio').click(function() {"
+                  "var pin = $(this).data('pin');"
+                  "$.get('/tgl?i=' + pin, function(data) {"
+                  "$('#status-' + pin).text(data);"
+                  "});"
+                  "});"
+                  "setInterval(function() {"
+                  "$.get('/getfloat', function(data) {"
+                  "$('#float-status').text(data == '1' ? 'ON' : 'OFF');"
+                  "});"
+                  "}, 1000);"
+                  "});"
+                  "function updateMode(index) {"
+                  "var mode = document.getElementById('mode' + index).value;"
+                  "document.getElementById('schedule' + index).style.display = (mode == '1') ? 'block' : 'none';"
+                  "document.getElementById('frequency' + index).style.display = (mode == '2') ? 'block' : 'none';"
+                  "document.getElementById('input' + index).style.display = (mode == '3') ? 'block' : 'none';"
+                  "}"
+                  "function setGPIO(index) {"
+                  "var gpio = document.getElementById('p' + index);"
+                  "var mode = document.getElementById('mode' + index);"
+                  "var sH = document.getElementById('sH' + index);"
+                  "var sM = document.getElementById('sM' + index);"
+                  "var eH = document.getElementById('eH' + index);"
+                  "var eM = document.getElementById('eM' + index);"
+                  "var freqOn = document.getElementById('freqOn' + index);"
+                  "var freqOff = document.getElementById('freqOff' + index);"
+                                    "var inputPin = document.getElementById('inputPin' + index);"
+                  "var debounceTime = document.getElementById('debounceTime' + index);"
+                  "if (!gpio || !mode || !sH || !sM || !eH || !eM || !freqOn || !freqOff || !inputPin || !debounceTime) {"
+                  "console.error('One or more elements are missing.');"
+                  "return;"
+                  "}"
+                  "var url = '/setp?i=' + index + '&gpio=' + gpio.value + "
+                  "'&mode=' + mode.value + "
+                  "'&sH=' + sH.value + "
+                  "'&sM=' + sM.value + "
+                  "'&eH=' + eH.value + "
+                  "'&eM=' + eM.value + "
+                  "'&freqOn=' + freqOn.value + "
+                  "'&freqOff=' + freqOff.value + "
+                  "'&inputPin=' + inputPin.value + "
+                  "'&debounceTime=' + debounceTime.value;"
+                  "console.log('Set GPIO: ' + url);"
+                  "location.href = url;"
+                  "}"
+                  "function toggleGPIO(index) {"
+                  "var url = '/tgl?i=' + index;"
+                  "console.log('Toggle GPIO: ' + url);"
+                  "location.href = url;"
+                  "}"
+                  "function updTime() {"
+                  "fetch('/gettime')"
+                  ".then(response => {"
+                  "if (!response.ok) {"
+                  "throw new Error('Network response was not ok');"
+                  "}"
+                  "return response.text();"
+                  "})"
+                  ".then(data => {"
+                  "document.getElementById('time').innerHTML = data;"
+                  "})"
+                  ".catch(error => {"
+                  "console.error('There has been a problem with your fetch operation:', error);"
+                  "});"
+                  "}"
+                  "setInterval(updTime, 1000);"
+                  "updTime();"
+                  "</script>"
+                  "<style>"
+                  "@media (max-width: 768px) {"
+                  ".col-md-4 { width: 100%; margin-bottom: 15px; }"
+                  "}"
+                  "</style>"
+                  "</head>"
+                  "<body>"
+                  "<div class='container mt-5'>"
+                  "<h1 class='text-center mb-4'>ESP32 GPIO Control</h1>"
+                  "<div id='time' class='text-center mb-3'>Loading time...</div>"
+                  "<div id='float-status' class='text-center mb-3'>Float Switch: Loading...</div>"
+                  "<div class='row'>" + generateHTML() + "</div>"
+                  "</div>"
+                  "</body>"
+                  "</html>";
+    srv.send(200, "text/html", page);
+}
+
+void handleToggle() {
+    int i = srv.arg("i").toInt();
+    digitalWrite(p[i], !digitalRead(p[i]));
+    Serial.println("Toggled GPIO " + String(p[i]) + " to " + (digitalRead(p[i]) ? "ON" : "OFF"));
+    srv.send(200, "text/plain", digitalRead(p[i]) ? "ON" : "OFF");
+}
+
+void handleSetAddRemovePin() {
+    Serial.println("handleSetAddRemovePin called");
+    int i = srv.arg("i").toInt();
+    int gpio = srv.arg("gpio").toInt();
+    bool isAdd = srv.uri() == "/addp";
+    bool isRm = srv.uri() == "/rmp";
+
+    // Debug prints to verify parameters received
+    Serial.println("Received parameters:");
+    Serial.println("i: " + String(i));
+    Serial.println("gpio: " + String(gpio));
+    Serial.println("mode: " + String(srv.arg("mode")));
+    Serial.println("sH: " + String(srv.arg("sH")));
+    Serial.println("sM: " + String(srv.arg("sM")));
+    Serial.println("eH: " + String(srv.arg("eH")));
+    Serial.println("eM: " + String(srv.arg("eM")));
+    Serial.println("freqOn: " + String(srv.arg("freqOn")));
+    Serial.println("freqOff: " + String(srv.arg("freqOff")));
+    Serial.println("inputPin: " + String(srv.arg("inputPin")));
+    Serial.println("debounceTime: " + String(srv.arg("debounceTime")));
+
+    if (isAdd && nP < maxP) {
+        SET_GPIO(nP++, gpio);
+        Serial.println("Added GPIO " + String(gpio));
+    } else if (isRm && i < nP) {
+        Serial.println("Removed GPIO " + String(p[i]));
+        for (int j = i; j < nP - 1; j++) {
+            p[j] = p[j + 1];
+            sch[j] = sch[j + 1];
+            schMin[j] = schMin[j + 1];
+        }
+        nP--;
+    } else {
+        sch[i].mode = srv.arg("mode").toInt();
+        sch[i].freqOn = srv.arg("freqOn").toInt();
+        sch[i].freqOff = srv.arg("freqOff").toInt();
+        sch[i].inputPin = srv.arg("inputPin").toInt();
+        sch[i].debounceTime = srv.arg("debounceTime").toInt();
+        sch[i].sH = srv.arg("sH").toInt();
+        sch[i].sM = srv.arg("sM").toInt();
+        sch[i].eH = srv.arg("eH").toInt();
+        sch[i].eM = srv.arg("eM").toInt();
+        schMin[i] = sch[i].sH * 60 + sch[i].sM;
+        SET_GPIO(i, gpio);
+        Serial.println("Set GPIO " + String(gpio) + " with new configuration.");
+    }
+    saveCfg();
+    REDIRECT_TO_ROOT();
+}
+
+void handleSetSchedule() {
+    int i = srv.arg("i").toInt();
+    sch[i].sH = srv.arg("sH").toInt();
+    sch[i].sM = srv.arg("sM").toInt();
+    sch[i].eH = srv.arg("eH").toInt();
+    sch[i].eM = srv.arg("eM").toInt();
+    schMin[i] = sch[i].sH * 60 + sch[i].sM;
+    saveCfg();
+    REDIRECT_TO_ROOT();
+}
+
+void handleSetFloat() {
+    flPin = srv.arg("gpio").toInt();
+    if (flPin >= 0) pinMode(flPin, INPUT);
+    saveCfg();
+    REDIRECT_TO_ROOT();
+}
+
+void handleGetFloat() {
+    srv.send(200, "text/plain", flPin >= 0 ? String(digitalRead(flPin)) : "0");
+}
+
+void handleGetTime() {
+    struct tm t;
+    if (!getLocalTime(&t)) {
+        srv.send(200, "text/plain", "Failed to get time");
+        return;
+    }
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &t);
+    srv.send(200, "text/plain", ts);
+}
+
+void setup() {
+    Serial.begin(115200); // Initialize serial for debugging
+    wifiSetup();
+    initSPIFFS();
+    configTime(gmt, 0, ntp);
+    loadCfg();
+    for (int i = 0; i < nP; i++) {
+        schMin[i] = sch[i].sH * 60 + sch[i].sM;
+        pinMode(p[i], OUTPUT);
+        digitalWrite(p[i], LOW);
+        if (sch[i].mode == 3) {
+            pinMode(sch[i].inputPin, INPUT);
+        }
+    }
+    if (flPin >= 0) pinMode(flPin, INPUT);
+    setupWebServer();
+}
+
+void loop() {
+    srv.handleClient();
+    chkSch();
+}
