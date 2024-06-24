@@ -1,0 +1,542 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+#include <time.h>
+#include <esp_system.h>
+
+// WiFi credentials
+const char* ssid = "HUAWEI 4G";
+const char* password = "0506211557";
+const char* ntpServer = "pool.ntp.org";
+
+// Server and configuration
+WebServer server(80);
+const int maxPins = 9;
+const int timezoneOffset = 10800;
+int numPins = 0;
+int floatPin = -1;
+int pins[maxPins];
+int startMinutes[maxPins];
+const char* version = "1.0.6";
+
+// Schedule structure
+struct Schedule {
+  uint8_t startHour, startMinute, endHour, endMinute, mode, inputPin, subMode;
+  uint16_t freqOn, freqOff, debounceTime, analogThreshold;
+} schedules[maxPins];
+
+// Macros
+#define SET_PIN_MODE(pin, mode) pinMode(pin, mode)
+#define DIGITAL_WRITE(pin, state) digitalWrite(pin, state)
+#define DIGITAL_READ(pin) digitalRead(pin)
+#define SAVE_CONFIG(file, data) (file.write((uint8_t*)&data, sizeof(data)))
+#define LOAD_CONFIG(file, data) (file.read((uint8_t*)&data, sizeof(data)))
+#define REDIRECT() (server.sendHeader("Location", "/"), server.send(303), void())
+
+// HTML content stored in PROGMEM
+const char webpageContent[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 GPIO Control</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f4f4f4;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      text-align: center;
+    }
+    .container {
+      background-color: white;
+      padding: 1.5rem;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      border-radius: 8px;
+      max-width: 500px;
+      width: 90%;
+      margin-bottom: 1rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      color: #333;
+      margin-bottom: 1rem;
+    }
+    input, select {
+      font-size: 1rem;
+      margin: 0.5rem 0;
+      padding: 0.5rem;
+      width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    button {
+      font-size: 1rem;
+      margin: 0.5rem 0.25rem;
+      padding: 0.5rem 1rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #007BFF;
+      color: white;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    .hidden {
+      display: none;
+    }
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: bold;
+    }
+    .gpio-control {
+      margin-bottom: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .gpio-control span {
+      flex: 1;
+    }
+    .gpio-buttons {
+      display: flex;
+    }
+    .led {
+      height: 10px;
+      width: 10px;
+      background-color: red;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .led.on {
+      background-color: green;
+    }
+    .status {
+      margin-bottom: 1rem;
+    }
+    .status div {
+      margin: 0.5rem 0;
+    }
+  </style>
+  <script>
+    function req(u, c) {
+      let x = new XMLHttpRequest();
+      x.open('GET', u, true);
+      x.onload = function() {
+        if (x.status === 200) c(x.responseText);
+      };
+      x.send();
+    }
+
+    function tg(i) {
+      req('/tgl?i=' + i, function(r) {
+        document.getElementById('st-' + i).textContent = r;
+        document.getElementById('led-' + i).className = r == 'ON' ? 'led on' : 'led';
+      });
+    }
+
+    function showSettings() {
+      let m = document.getElementById('mode').value;
+      document.getElementById('schedule').classList.toggle('hidden', m != '1');
+      document.getElementById('frequency').classList.toggle('hidden', m != '2');
+      document.getElementById('inputPin').classList.toggle('hidden', m != '3');
+      document.getElementById('analogRead').classList.toggle('hidden', m != '4');
+    }
+
+    function removeGPIO(i) {
+      req('/rmp?i=' + i, function() {
+        location.reload();
+      });
+    }
+
+    function editGPIO(i) {
+      // For simplicity, reload and allow user to edit the GPIO settings
+      location.reload();
+    }
+
+    function addOrUpdateGPIO(isUpdate, index) {
+      let g = document.getElementById('np').value;
+      let m = document.getElementById('mode').value;
+      let p = isUpdate ? '/updp?i=' + index + '&gpio=' + g + '&mode=' + m : '/addp?gpio=' + g + '&mode=' + m;
+      if (m == '1') {
+        p += '&sH=' + document.getElementById('sH').value + '&sM=' + document.getElementById('sM').value + '&eH=' + document.getElementById('eH').value + '&eM=' + document.getElementById('eM').value;
+      } else if (m == '2') {
+        p += '&fO=' + document.getElementById('fO').value + '&fF=' + document.getElementById('fF').value + '&subMode=' + document.getElementById('subMode').value;
+      } else if (m == '3') {
+        p += '&i=' + document.getElementById('i').value + '&dT=' + document.getElementById('dT').value;
+      } else if (m == '4') {
+        p += '&i=' + document.getElementById('analogPin').value + '&analogThreshold=' + document.getElementById('analogThreshold').value;
+      }
+      req(p, function() {
+        location.reload();
+      });
+    }
+
+    function loadControls() {
+      req('/getconfig', function(res) {
+        var config = JSON.parse(res);
+               var controls = '';
+        for (var i = 0; i < config.numPins; i++) {
+          controls += '<div class="gpio-control">';
+          controls += '<span>GPIO ' + config.pins[i] + ':</span>';
+          controls += '<div class="gpio-buttons">';
+          controls += '<button onclick="tg(' + i + ')">Toggle</button>';
+          controls += '<button onclick="editGPIO(' + i + ')">Edit</button>';
+          controls += '<button onclick="removeGPIO(' + i + ')">Remove</button>';
+          controls += '</div>';
+          controls += '<span id="st-' + i + '">' + (config.states[i] ? 'ON' : 'OFF') + '</span>';
+          controls += '<span id="led-' + i + '" class="led ' + (config.states[i] ? 'on' : '') + '"></span>';
+          controls += '</div>';
+        }
+        document.getElementById('gpio-controls').innerHTML = controls;
+      });
+    }
+
+    window.onload = function() {
+      loadControls();
+      setInterval(function() {
+        req('/getstatus', function(res) {
+          var status = JSON.parse(res);
+          document.getElementById('time').textContent = 'Current Time: ' + status.time;
+          document.getElementById('cputemp').textContent = 'CPU Temp: ' + status.cputemp + ' °C';
+          document.getElementById('uptime').textContent = 'Uptime: ' + status.uptime;
+        });
+      }, 500); // Interval reduced to 500ms
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>ESP32 GPIO Control</h1>
+    <div class="form-group">
+      <label for="np">GPIO Number:</label>
+      <input type='number' id='np' placeholder='Enter GPIO number'>
+    </div>
+    <div class="form-group">
+      <label for="mode">Mode:</label>
+      <select id='mode' onchange='showSettings()'>
+        <option value='0'>Always Off</option>
+        <option value='1'>Scheduled</option>
+        <option value='2'>Frequency</option>
+        <option value='3'>Input Pin with Debounce</option>
+        <option value='4'>Analog Read</option>
+      </select>
+    </div>
+    <div id='schedule' class='form-group hidden'>
+      <label>Start Time:</label>
+      <input type='number' id='sH' placeholder='Hour'><br>
+      <input type='number' id='sM' placeholder='Minute'><br>
+      <label>End Time:</label>
+      <input type='number' id='eH' placeholder='Hour'><br>
+      <input type='number' id='eM' placeholder='Minute'><br>
+    </div>
+    <div id='frequency' class='form-group hidden'>
+      <label>Frequency:</label>
+      <input type='number' id='fO' placeholder='On Time (ms)'><br>
+      <input type='number' id='fF' placeholder='Off Time (ms)'><br>
+      <label>Sub Mode:</label>
+      <select id='subMode'>
+        <option value='0'>Minutes</option>
+        <option value='1'>Seconds</option>
+        <option value='2'>Milliseconds</option>
+      </select><br>
+    </div>
+    <div id='inputPin' class='form-group hidden'>
+      <label>Input GPIO:</label>
+      <input type='number' id='i' placeholder='Input GPIO'><br>
+      <label>Debounce Time (ms):</label>
+      <input type='number' id='dT' placeholder='Debounce Time'><br>
+    </div>
+    <div id='analogRead' class='form-group hidden'>
+      <label>Analog Pin:</label>
+      <input type='number' id='analogPin' placeholder='Analog Pin'><br>
+      <label>Threshold:</label>
+      <input type='number' id='analogThreshold' placeholder='Threshold'><br>
+    </div>
+    <button onclick='addOrUpdateGPIO(false, -1)'>Add GPIO</button>
+  </div>
+  <div class="container">
+    <h2>GPIO Controls</h2>
+    <div id="gpio-controls"></div>
+  </div>
+  <div class="container">
+    <h2>Status</h2>
+    <div class="status">
+      <div id="time">Current Time: Loading...</div>
+      <div id="cputemp">CPU Temp: Loading...</div>
+      <div id="uptime">Uptime: Loading...</div>
+    </div>
+    <button onclick='req("/save", function(){location.reload();})'>Save Settings</button>
+    <button onclick='req("/restore", function(){location.reload();})'>Restore Settings</button>
+    <button onclick='req("/format", function(){location.reload();})'>Format SPIFFS</button>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+void setupWiFi() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+}
+
+void initSPIFFS() {
+  if (!SPIFFS.begin(true)) return;
+}
+
+void checkSchedules() {
+  struct tm timeInfo;
+  if (!getLocalTime(&timeInfo)) return;
+  uint16_t currentMinutes = timeInfo.tm_hour * 60 + timeInfo.tm_min;
+  static uint32_t lastMillis[maxPins] = {0}, lastDebounce[maxPins] = {0};
+  static int lastState[maxPins] = {LOW}, buttonState[maxPins] = {LOW};
+
+  for (int i = 0; i < numPins; i++) {
+    uint32_t elapsed;
+    int reading;
+    switch (schedules[i].subMode) {
+      case 0: elapsed = (millis() - lastMillis[i]) / 60000; break;
+      case 1: elapsed = (millis() - lastMillis[i]) / 1000; break;
+      case 2: elapsed = millis() - lastMillis[i]; break;
+    }
+    switch (schedules[i].mode) {
+      case 0: DIGITAL_WRITE(pins[i], LOW); break;
+      case 1: 
+        DIGITAL_WRITE(pins[i], (currentMinutes >= startMinutes[i] && currentMinutes < schedules[i].endHour * 60 + schedules[i].endMinute) ? HIGH : LOW); 
+        break;
+      case 2: 
+        if (elapsed >= schedules[i].freqOn + schedules[i].freqOff) lastMillis[i] = millis();
+        DIGITAL_WRITE(pins[i], elapsed < schedules[i].freqOn ? HIGH : LOW); 
+        break;
+      case 3: 
+        reading = DIGITAL_READ(schedules[i].inputPin);
+        if (reading != lastState[i]) lastDebounce[i] = millis();
+        if ((millis() - lastDebounce[i]) > schedules[i].debounceTime) { 
+          if (reading != buttonState[i]) { 
+            buttonState[i] = reading; 
+            DIGITAL_WRITE(pins[i], buttonState[i]); 
+          } 
+        } 
+        lastState[i] = reading; 
+        break;
+      case 4: 
+        int analogValue = analogRead(schedules[i].inputPin);
+        DIGITAL_WRITE(pins[i], analogValue >= schedules[i].analogThreshold ? HIGH : LOW);
+        break;
+    }
+  }
+}
+
+void saveConfig() {
+  File file = SPIFFS.open("/gpio_cfg.bin", FILE_WRITE);
+  if (!file) return;
+  SAVE_CONFIG(file, numPins);
+  SAVE_CONFIG(file, floatPin);
+  for (int i = 0; i < numPins; i++) {
+    SAVE_CONFIG(file, pins[i]);
+    SAVE_CONFIG(file, schedules[i]);
+  }
+  file.close();
+}
+
+void loadConfig() {
+  File file = SPIFFS.open("/gpio_cfg.bin", FILE_READ);
+  if (!file) return;
+  LOAD_CONFIG(file, numPins);
+  LOAD_CONFIG(file, floatPin);
+  for (int i = 0; i < numPins; i++) {
+    LOAD_CONFIG(file, pins[i]);
+    LOAD_CONFIG(file, schedules[i]);
+  }
+  file.close();
+}
+
+float getCPUTemperature() {
+  return temperatureRead();
+}
+
+void handleSave() {
+  saveConfig();
+  server.send(200, "text/plain", "Settings saved");
+}
+
+void handleRestore() {
+  loadConfig();
+  server.send(200, "text/plain", "Settings restored");
+}
+
+void handleFormat() {
+  SPIFFS.format();
+  server.send(200, "text/plain", "SPIFFS formatted");
+}
+
+void handleGetConfig() {
+  String json = "{";
+  json += "\"numPins\":" + String(numPins) + ",";
+  json += "\"pins\":[";
+  for (int i = 0; i < numPins; i++) {
+    if (i > 0) json += ",";
+    json += String(pins[i]);
+  }
+   json += "],\"states\":[";
+  for (int i = 0; i < numPins; i++) {
+    if (i > 0) json += ",";
+    json += String(DIGITAL_READ(pins[i]));
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+void handleSetPin() {
+  int gpio = server.arg("gpio").toInt(), mode = server.arg("mode").toInt();
+  bool isAdd = server.uri() == "/addp";
+  int index = server.arg("i").toInt();
+  if (isAdd && numPins < maxPins) {
+    pins[numPins] = gpio;
+    SET_PIN_MODE(pins[numPins], OUTPUT);
+    DIGITAL_WRITE(pins[numPins], LOW);
+    schedules[numPins].mode = mode;
+    if (mode == 1) {
+      schedules[numPins].startHour = server.arg("sH").toInt();
+      schedules[numPins].startMinute = server.arg("sM").toInt();
+      schedules[numPins].endHour = server.arg("eH").toInt();
+      schedules[numPins].endMinute = server.arg("eM").toInt();
+      startMinutes[numPins] = schedules[numPins].startHour * 60 + schedules[numPins].startMinute;
+    } else if (mode == 2) {
+      schedules[numPins].freqOn = server.arg("fO").toInt();
+      schedules[numPins].freqOff = server.arg("fF").toInt();
+      schedules[numPins].subMode = server.arg("subMode").toInt();
+    } else if (mode == 3) {
+      schedules[numPins].inputPin = server.arg("i").toInt();
+      schedules[numPins].debounceTime = server.arg("dT").toInt();
+      SET_PIN_MODE(schedules[numPins].inputPin, INPUT);
+    } else if (mode == 4) {
+      schedules[numPins].inputPin = server.arg("analogPin").toInt();
+      schedules[numPins].analogThreshold = server.arg("analogThreshold").toInt();
+      SET_PIN_MODE(schedules[numPins].inputPin, INPUT);
+    }
+    numPins++;
+  } else if (!isAdd && index < numPins) {
+    pins[index] = gpio;
+    schedules[index].mode = mode;
+    if (mode == 1) {
+      schedules[index].startHour = server.arg("sH").toInt();
+      schedules[index].startMinute = server.arg("sM").toInt();
+      schedules[index].endHour = server.arg("eH").toInt();
+      schedules[index].endMinute = server.arg("eM").toInt();
+      startMinutes[index] = schedules[index].startHour * 60 + schedules[index].startMinute;
+    } else if (mode == 2) {
+      schedules[index].freqOn = server.arg("fO").toInt();
+      schedules[index].freqOff = server.arg("fF").toInt();
+      schedules[index].subMode = server.arg("subMode").toInt();
+    } else if (mode == 3) {
+      schedules[index].inputPin = server.arg("i").toInt();
+      schedules[index].debounceTime = server.arg("dT").toInt();
+      SET_PIN_MODE(schedules[index].inputPin, INPUT);
+    } else if (mode == 4) {
+      schedules[index].inputPin = server.arg("analogPin").toInt();
+      schedules[index].analogThreshold = server.arg("analogThreshold").toInt();
+      SET_PIN_MODE(schedules[index].inputPin, INPUT);
+    }
+  } else if (server.uri() == "/rmp") {
+    if (index < numPins) {
+      for (int j = index; j < numPins - 1; j++) {
+        pins[j] = pins[j + 1];
+        schedules[j] = schedules[j + 1];
+        startMinutes[j] = startMinutes[j + 1];
+      }
+      numPins--;
+    }
+  }
+  saveConfig();
+  REDIRECT();
+}
+
+void handleRoot() {
+  String page = FPSTR(webpageContent);
+  server.send(200, "text/html", page);
+}
+
+void handleToggle() {
+  int index = server.arg("i").toInt();
+  DIGITAL_WRITE(pins[index], !DIGITAL_READ(pins[index]));
+  server.send(200, "text/plain", DIGITAL_READ(pins[index]) ? "ON" : "OFF");
+}
+
+void handleGetStatus() {
+  struct tm timeInfo;
+  if (!getLocalTime(&timeInfo)) {
+    server.send(200, "application/json", "{\"time\":\"Failed to get time\",\"cputemp\":\"N/A\",\"uptime\":\"N/A\"}");
+    return;
+  }
+
+  char timeString[32];
+  strftime(timeString, sizeof(timeString), "%Y-%m-%d %H:%M:%S", &timeInfo);
+
+  float cpuTemp = getCPUTemperature();
+  unsigned long uptime = millis() / 1000;
+  char uptimeString[20];
+  snprintf(uptimeString, sizeof(uptimeString), "%02lu:%02lu:%02lu", uptime / 3600, (uptime % 3600) / 60, uptime % 60);
+
+  String json = "{";
+  json += "\"time\":\"" + String(timeString) + "\",";
+  json += "\"cputemp\":\"" + String(cpuTemp) + "\",";
+  json += "\"uptime\":\"" + String(uptimeString) + "\"";
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleSetFloatPin() {
+  floatPin = server.arg("floatPin").toInt();
+  saveConfig();
+  server.send(200, "text/plain", "Float Pin set");
+}
+
+void handleGetFloatPin() {
+  server.send(200, "text/plain", String(floatPin));
+}
+
+void setup() {
+  setupWiFi();
+  initSPIFFS();
+  configTime(timezoneOffset, 0, ntpServer);
+  loadConfig();
+  for (int i = 0; i < numPins; i++) {
+    startMinutes[i] = schedules[i].startHour * 60 + schedules[i].startMinute;
+    SET_PIN_MODE(pins[i], OUTPUT);
+    DIGITAL_WRITE(pins[i], LOW);
+    if (schedules[i].mode == 3 || schedules[i].mode == 4) {
+      SET_PIN_MODE(schedules[i].inputPin, INPUT);
+    }
+  }
+  if (floatPin >= 0) SET_PIN_MODE(floatPin, INPUT);
+  server.on("/", handleRoot);
+  server.on("/tgl", handleToggle);
+  server.on("/addp", handleSetPin);
+  server.on("/updp", handleSetPin);
+  server.on("/rmp", handleSetPin);
+  server.on("/setfloat", handleSetFloatPin);
+  server.on("/getfloat", handleGetFloatPin);
+  server.on("/getstatus", handleGetStatus);
+  server.on("/save", handleSave);
+  server.on("/restore", handleRestore);
+  server.on("/format", handleFormat);
+  server.on("/getconfig", handleGetConfig);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  checkSchedules();
+}
